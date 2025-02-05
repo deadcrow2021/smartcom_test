@@ -1,0 +1,125 @@
+services:
+  db:
+    image: postgres:16.2
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      PGDATA: "/var/lib/postgresql/data"
+    ports:
+      - "5432:5432"
+    volumes:
+      - './data/postgres-data:/var/lib/pgdata'
+    env_file:
+      - .env
+
+  sftp-server:
+    image: atmoz/sftp
+    container_name: sftp-server
+    ports:
+      - "2222:22"
+    volumes:
+      - ./data/sftp-server:/home/sftpuser/uploads
+    environment:
+      - SFTP_USERS=${SFTPUSER}:${SFTPPASSWORD}:::uploads
+    env_file:
+      - .env
+
+  sftp-server-1:
+    image: atmoz/sftp
+    container_name: sftp-server-1
+    ports:
+      - "2223:22"
+    volumes:
+      - ./data/sftp-server-1:/home/sftpuser/uploads
+    environment:
+      - SFTP_USERS=${SFTPUSER}:${SFTPPASSWORD}:::uploads
+    env_file:
+      - .env
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - ./data/minio-data:/data
+    command: server /data --console-address ":9001"
+    env_file:
+      - .env
+
+  mc:
+    image: minio/mc
+    container_name: mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc config host add myminio http://minio:9000 ${MINIO_ACCESS_KEY} ${MINIO_SECRET_KEY}) do echo 'Waiting for MinIO to start...'; sleep 5; done;
+      /usr/bin/mc mb myminio/${MINIO_BUCKET};
+      exit 0;
+      "
+    env_file:
+      - .env
+
+  rabbitmq:
+    image: rabbitmq:management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASSWORD}
+    env_file:
+      - .env
+  
+  redis:
+    image: "redis:latest"
+    container_name: redis
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_USER=${REDIS_USER}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    env_file:
+      - .env
+
+  service:
+    image: "python:3.10-slim"
+    build:
+      context: .
+    container_name: service
+    working_dir: /server
+    ports:
+      - "8000:8000"
+    depends_on:
+      - rabbitmq
+      - minio
+      - mc
+      - sftp-server
+      - redis
+      - db
+      - worker
+    volumes:
+      - ./:/server
+    command: ["python3", "./main.py"]
+
+  worker:
+    image: "python:3.10-slim"
+    container_name: worker
+    working_dir: /server
+    depends_on:
+      - rabbitmq
+      - minio
+      - mc
+      - sftp-server
+      - redis
+      - db
+    volumes:
+      - ./:/server
+    command: ["celery", "-A", "src.core.worker", "worker", "--loglevel=info", "-P", "gevent"]
